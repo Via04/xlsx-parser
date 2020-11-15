@@ -3,6 +3,21 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
 
 
+# Custom Errors
+class NonePointer(Exception):
+    """
+    Raise when something points on None
+    """
+    pass
+
+
+class UndefinedHeaderError(Exception):
+    """
+    Raise when referenced to non-existing header of exel file
+    """
+    pass
+
+
 # Static Service functions
 def get_number(st: str) -> tuple:
     """
@@ -82,7 +97,6 @@ def is_formula(st: str) -> bool:
     return True if st.startswith('=') else False
 
 
-# Main Class
 def get_end_row(col: tuple, start: int) -> int:
     """
     finds ending row in given column and sums it with start - 1 (to get last row)
@@ -96,13 +110,24 @@ def get_end_row(col: tuple, start: int) -> int:
     return start + counter - 1
 
 
+# Main Class
 class XLSXParser:
     STARTING_ROW = 5  # the number of row after headers
+    PAGE_WITH_PERIOD_DATA = 1
+    PAGE_WITH_UNIT_DATA = 2
+    NUM_SUBSECTIONS = {'Раз', 'Объем', 'Расценка', 'Годовая стоимость'}
+    PERIOD_SUBSECTIONS = {'Периодичность', }
+    UNIT_SUBSECTIONS = {'Ед.изм.', }
     ending_row = 600
     filepath = 'default_name.xlsx'
     _wb = None  # variable to store .xlsx Workbook
     _ws = None  # variable to store worksheet
     red_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')  # default error color (RED)
+    yellow_fill = PatternFill(start_color='FFFFF200', end_color='FFFFF200', fill_type='solid') # default color for
+    # marking period errors
+    sepia_fill = PatternFill(start_color='FFE3B778', end_color='FFE3B778', fill_type='solid')
+    period_list = set()
+    unit_list = set()
 
     def __init__(self, path: str):
         try:
@@ -117,10 +142,12 @@ class XLSXParser:
                                      values_only=True)
             self.ending_row = get_end_row(next(col), self.STARTING_ROW)
             print(self.ending_row)
+            self.period_list = self.get_values(self.PAGE_WITH_PERIOD_DATA)
+            self.unit_list = self.get_values(self.PAGE_WITH_UNIT_DATA)
         except (InvalidFileException, FileNotFoundError):
             print("Error! Bad path!")
 
-    def fix_column(self, col: tuple, col_num: int):
+    def fix_num_column(self, col: tuple, col_num: int):
         """
         Fixes and marks errors by checking for number cell of a particular column, workbook variable must be defined
         :param col: tuple
@@ -148,27 +175,83 @@ class XLSXParser:
                             # print(str(cel) + 'contains error')
                             self._ws.cell(row=row_counter, column=col_num).fill = self.red_fill  # and if it is not
                     row_counter += 1  # a number at all mark it with marking color.
+        else:
+            raise NonePointer('worksheet is not defined')
+
+    def fix_other_column(self, col: tuple, col_num: int, header: str):
+        """
+        Fixes period and unit column, header of the column should be passed to function to choose needed checklist, can
+        raise UndefinedHeaderError header is wrong
+        :param col: tuple
+        :param col_num: int
+        :param header: str
+        :return:
+        """
+        if self._ws is not None:
+            checklist = set()
+            highlight = None
+            if header in self.PERIOD_SUBSECTIONS:
+                checklist = self.period_list
+                highlight = self.yellow_fill
+            elif header in self.UNIT_SUBSECTIONS:
+                checklist = self.unit_list
+                highlight = self.sepia_fill
+            else:
+                raise UndefinedHeaderError('header does not exist in any of given subsections')
+            row_counter = self.STARTING_ROW
+            for cel in col:
+                if cel not in checklist and cel is not None and cel != '':
+                    self._ws.cell(row_counter, col_num).fill = highlight
+                row_counter += 1
+        else:
+            raise NonePointer('worksheet is not defined')
 
     def find_errors(self):  # this function basically used just to parse through the table
         if self._ws is not None:
             col_counter = 4
             subsection_amount = 961
-            num_subsections = ['Раз', 'Объем', 'Расценка', 'Годовая стоимость']
-            text_subsections = ['Периодичность', 'Ед.изм.']
             for i in range(subsection_amount):
+                header = self._ws.cell(column=col_counter, row=self.STARTING_ROW - 1).value
+                col = self._ws.iter_cols(min_col=col_counter,
+                                         max_col=col_counter,
+                                         min_row=self.STARTING_ROW,
+                                         max_row=self.ending_row,
+                                         values_only=True)
+                col_tup = next(col)
                 # print(self._ws.cell(column=col_counter, row=self.STARTING_ROW - 1).value)
-                if self._ws.cell(column=col_counter, row=self.STARTING_ROW - 1).value in num_subsections:
-                    col = self._ws.iter_cols(min_col=col_counter,
-                                             max_col=col_counter,
-                                             min_row=self.STARTING_ROW,
-                                             max_row=self.ending_row,
-                                             values_only=True)
-                    col_tup = next(col)
-                    self.fix_column(col_tup, col_counter)
+                if header in self.NUM_SUBSECTIONS:
+                    self.fix_num_column(col_tup, col_counter)
                     # print(col_tup)
+                elif header in self.UNIT_SUBSECTIONS or header in self.PERIOD_SUBSECTIONS:
+                    self.fix_other_column(col_tup, col_counter, header)
                 col_counter += 1
 
             self._wb.save(self.filepath)
+        else:
+            raise NonePointer('Worksheet is not defined')
+
+    def get_values(self, sheet: int) -> set:
+        """
+        Scans values from the first column of given Worksheet and returns them in tuple
+        :param sheet: int
+        :return: set
+        """
+        if self._wb is not None:
+            try:
+                self._wb.active = sheet
+                ws = self._wb.active
+                counter = 1
+                ans = set()
+                while ws.cell(counter, 1).value is not None and ws.cell(counter, 1).value != '' and counter <= 1000:
+                    ans.add(ws.cell(counter, 1).value)
+                    counter += 1
+                print(ans)
+                self._wb.active = 0  # sets first page as active after all actions, just in case
+                return ans
+            except AttributeError:
+                print('page is not defined or does not exist')
+        else:
+            raise NonePointer('Workbook is not defined')
 
 
 s = input('input path to .xlsx file: ')
