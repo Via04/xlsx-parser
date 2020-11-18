@@ -1,6 +1,9 @@
+from collections import OrderedDict
+
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
+from openpyxl.worksheet.datavalidation import DataValidation
 
 
 # Custom Errors
@@ -18,17 +21,25 @@ class UndefinedHeaderError(Exception):
     pass
 
 
+class InputError(Exception):
+    """
+    Raise when user input causes error
+    """
+    pass
+
+
 # Static Service functions
 def get_number(st: str) -> tuple:
     """
     Checks if given parameter is number, returns true if it is (number can be divided by comma or by point) returns True
-    if number and number in python format as second argument if it is not number returns None
+    if number and number in python format as second argument if it is not number returns unchanged parameter,
+    also returns is_changed status if parameter changed
     :param st: str
-    :return: bool
+    :return: tuple(is_num, is_changed, num)
     """
     try:
         tmp = float(st)
-        return True, tmp
+        return True, False, tmp
     except (ValueError, TypeError):
         try:
             list_num = st.split(',')
@@ -39,15 +50,13 @@ def get_number(st: str) -> tuple:
                     list_num[0] = list_num[0][1:]
                 if list_num[0].isdigit() and list_num[1].isdigit():
                     if neg:
-                        return True, -1 * (float(list_num[0] + '.' + list_num[1]))
+                        return True, True, -1 * (float(list_num[0] + '.' + list_num[1]))
                     else:
-                        return True, float(list_num[0] + '.' + list_num[1])
+                        return True, True, float(list_num[0] + '.' + list_num[1])
             else:
-                return False, None
+                return False, False, st
         except AttributeError:
-            return False, None
-        # print(str(st) + ' is not a number')
-        return False, None
+            return False, False, st
 
 
 def trunc(num: float, precision: int) -> float:
@@ -110,24 +119,58 @@ def get_end_row(col: tuple, start: int) -> int:
     return start + counter - 1
 
 
+def get_validator(lt) -> DataValidation:
+    """
+    returns data validator initialized with specified list(set)
+    :param lt:
+    :return:
+    """
+    formula = ','.join(lt)
+    formula = '"' + formula + '"'
+    dv = DataValidation(type='list', formula1=formula, showDropDown=True)
+    return dv
+
+
+def parse_input(st: str) -> tuple:
+    """
+    parse user input string with path and boolean variable that says if validator should be used
+    :param st:
+    :return: tuple
+    """
+    try:
+        path, set_validator = st.split(',')
+        is_set = False
+        if set_validator.strip() == 'y':
+            is_set = True
+        elif set_validator.strip() == 'n':
+            is_set = False
+        else:
+            raise InputError
+        return path, is_set
+    except ValueError:
+        raise InputError
+
+
 # Main Class
 class XLSXParser:
     STARTING_ROW = 5  # the number of row after headers
-    PAGE_WITH_PERIOD_DATA = 1
-    PAGE_WITH_UNIT_DATA = 2
-    NUM_SUBSECTIONS = {'Раз', 'Объем', 'Расценка', 'Годовая стоимость'}
-    PERIOD_SUBSECTIONS = {'Периодичность', }
+    PAGE_WITH_PERIOD_DATA = 1  # constant that stores number of page with period data
+    PAGE_WITH_UNIT_DATA = 2  # constant that stores number of page with unit data
+    NUM_SUBSECTIONS = {'Раз', 'Объем', 'Расценка', 'Годовая стоимость'}  # needed sections for fix_num_column
+    PERIOD_SUBSECTIONS = {'Периодичность', }  # needed sections for fix_other_column (applies to next line too)
     UNIT_SUBSECTIONS = {'Ед.изм.', }
-    ending_row = 600
-    filepath = 'default_name.xlsx'
+    ending_row = 600  # number of row to watch in first column, will be changed in __init__ according to number of rows
+    filepath = 'default_name.xlsx'  # in column
     _wb = None  # variable to store .xlsx Workbook
     _ws = None  # variable to store worksheet
     red_fill = PatternFill(start_color='FFFF0000', end_color='FFFF0000', fill_type='solid')  # default error color (RED)
     yellow_fill = PatternFill(start_color='FFFFF200', end_color='FFFFF200', fill_type='solid') # default color for
     # marking period errors
     sepia_fill = PatternFill(start_color='FFE3B778', end_color='FFE3B778', fill_type='solid')
-    period_list = set()
-    unit_list = set()
+    period_list = set()  # here will be stored period data from exel file
+    unit_list = set()  # here will be stored unit data from exel file
+    period_validator = None  # just initializing empty variables for better readability
+    unit_validator = None
 
     def __init__(self, path: str):
         try:
@@ -144,22 +187,37 @@ class XLSXParser:
             print(self.ending_row)
             self.period_list = self.get_values(self.PAGE_WITH_PERIOD_DATA)
             self.unit_list = self.get_values(self.PAGE_WITH_UNIT_DATA)
+            self.period_validator = get_validator(self.period_list)
+            self.unit_validator = get_validator(self.unit_list)
+            self.period_validator.errorTitle = self.unit_validator.errorTitle = 'Invalid Entry'
+            self.period_validator.errorTitle = self.unit_validator.errorTitle = 'Given entry is prohibited'
+            self.period_validator.promptTitle = 'Period list selection'
+            self.period_validator.prompt = 'Please select period from list'
+            self.unit_validator.promptTitle = 'Unit list selection'
+            self.unit_validator.prompt = 'Please select unit from list'
+            self._ws.add_data_validation(self.period_validator)
+            self._ws.add_data_validation(self.unit_validator)
+
         except (InvalidFileException, FileNotFoundError):
             print("Error! Bad path!")
 
-    def fix_num_column(self, col: tuple, col_num: int):
+    def fix_num_column(self, col: tuple, col_num: int) -> bool:
         """
-        Fixes and marks errors by checking for number cell of a particular column, workbook variable must be defined
+        Fixes and marks errors by checking for number cell of a particular column, workbook variable must be defined,
+        returns status is_modified
         :param col: tuple
         :param col_num: int
-        :return: None
+        :return: bool
         """
+        is_modified = False
         if self._ws is not None:  # check is worksheet exists
             row_counter = self.STARTING_ROW  # initializing counter on the first row after header
             for cel in col:
                 if cel is not None:  # checking cell conditions
-                    is_num, num = get_number(cel)
-                    if is_num:
+                    is_num, is_changed, num = get_number(cel)
+                    if is_changed:
+                        is_modified = True  # if any cell should be changed return function modified status
+                    if is_num:  # true
                         # print(str(cel) + ' is a number')
                         if is_integer(num):
                             # print(str(cel) + ' is integer')
@@ -177,37 +235,48 @@ class XLSXParser:
                     row_counter += 1  # a number at all mark it with marking color.
         else:
             raise NonePointer('worksheet is not defined')
+        return is_modified
 
-    def fix_other_column(self, col: tuple, col_num: int, header: str):
+    def fix_other_column(self, col: tuple, col_num: int, header: str) -> bool:
         """
-        Fixes period and unit column, header of the column should be passed to function to choose needed checklist, can
-        raise UndefinedHeaderError header is wrong
+        Fixes period and unit column, header of the column should be passed to function to choose needed checklist,
+        returns status is_modified. Can raise UndefinedHeaderError if header is wrong
         :param col: tuple
         :param col_num: int
         :param header: str
-        :return:
+        :return: bool
         """
+        is_modified = False
         if self._ws is not None:
             checklist = set()
             highlight = None
+            validator = None
             if header in self.PERIOD_SUBSECTIONS:
                 checklist = self.period_list
                 highlight = self.yellow_fill
+                validator = self.period_validator
             elif header in self.UNIT_SUBSECTIONS:
                 checklist = self.unit_list
                 highlight = self.sepia_fill
+                validator = self.unit_validator
             else:
                 raise UndefinedHeaderError('header does not exist in any of given subsections')
             row_counter = self.STARTING_ROW
             for cel in col:
                 if cel not in checklist and cel is not None and cel != '':
-                    self._ws.cell(row_counter, col_num).fill = highlight
+                    if self._ws.cell(row_counter, col_num).fill != highlight:  # if not yet marked
+                        self._ws.cell(row_counter, col_num).fill = highlight
+                        is_modified = True  # if any cell highlighted (changed) - change modify status
+                validator.add(self._ws.cell(row_counter, col_num))
                 row_counter += 1
         else:
             raise NonePointer('worksheet is not defined')
+        return is_modified
 
-    def find_errors(self):  # this function basically used just to parse through the table
+    def find_errors(self, is_set_validator):  # this function basically used just to parse through the table
         if self._ws is not None:
+            is_num_modified = False
+            is_other_modified = False
             col_counter = 4
             subsection_amount = 961
             for i in range(subsection_amount):
@@ -220,33 +289,39 @@ class XLSXParser:
                 col_tup = next(col)
                 # print(self._ws.cell(column=col_counter, row=self.STARTING_ROW - 1).value)
                 if header in self.NUM_SUBSECTIONS:
-                    self.fix_num_column(col_tup, col_counter)
+                    tmp = self.fix_num_column(col_tup, col_counter)
+                    if tmp:
+                        is_num_modified = True
                     # print(col_tup)
                 elif header in self.UNIT_SUBSECTIONS or header in self.PERIOD_SUBSECTIONS:
-                    self.fix_other_column(col_tup, col_counter, header)
+                    tmp = self.fix_other_column(col_tup, col_counter, header)
+                    if tmp:
+                        is_other_modified = True
                 col_counter += 1
-
-            self._wb.save(self.filepath)
+            print(is_num_modified, is_other_modified)
+            if is_num_modified or is_other_modified or is_set_validator:
+                self._wb.save(self.filepath)
         else:
             raise NonePointer('Worksheet is not defined')
 
-    def get_values(self, sheet: int) -> set:
+    def get_values(self, sheet: int) -> tuple:
         """
         Scans values from the first column of given Worksheet and returns them in tuple
         :param sheet: int
-        :return: set
+        :return: tuple
         """
         if self._wb is not None:
             try:
                 self._wb.active = sheet
                 ws = self._wb.active
                 counter = 1
-                ans = set()
+                ans = []
                 while ws.cell(counter, 1).value is not None and ws.cell(counter, 1).value != '' and counter <= 1000:
-                    ans.add(ws.cell(counter, 1).value)
+                    ans.append(ws.cell(counter, 1).value)
                     counter += 1
-                print(ans)
                 self._wb.active = 0  # sets first page as active after all actions, just in case
+                ans = tuple(OrderedDict.fromkeys(ans))  # delete all duplicates preserving order
+                print(ans)
                 return ans
             except AttributeError:
                 print('page is not defined or does not exist')
@@ -254,7 +329,8 @@ class XLSXParser:
             raise NonePointer('Workbook is not defined')
 
 
-s = input('input path to .xlsx file: ')
+s = input('input path to .xlsx file and write y/n separated by comma whether you need or not to add validator: ')
 # print(s)
-xl = XLSXParser(s)
-xl.find_errors()
+path, is_validator = parse_input(s)
+xl = XLSXParser(path)
+xl.find_errors(is_validator)
