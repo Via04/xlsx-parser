@@ -4,6 +4,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.utils import get_column_letter
 
 
 # Custom Errors
@@ -119,16 +120,13 @@ def get_end_row(col: tuple, start: int) -> int:
     return start + counter - 1
 
 
-def get_validator(lt) -> DataValidation:
+def quote_string(st: str) -> str:
     """
-    returns data validator initialized with specified list(set)
-    :param lt:
-    :return:
+    add single quotes to string from both sides
+    :param st: str
+    :return: str
     """
-    formula = ','.join(lt)
-    formula = '"' + formula + '"'
-    dv = DataValidation(type='list', formula1=formula, showDropDown=True)
-    return dv
+    return "'{}'".format(st)
 
 
 def parse_input(st: str) -> tuple:
@@ -159,6 +157,7 @@ class XLSXParser:
     NUM_SUBSECTIONS = {'Раз', 'Объем', 'Расценка', 'Годовая стоимость'}  # needed sections for fix_num_column
     PERIOD_SUBSECTIONS = {'Периодичность', }  # needed sections for fix_other_column (applies to next line too)
     UNIT_SUBSECTIONS = {'Ед.изм.', }
+    ENDING_ROW = 600
     ending_row = 600  # number of row to watch in first column, will be changed in __init__ according to number of rows
     filepath = 'default_name.xlsx'  # in column
     _wb = None  # variable to store .xlsx Workbook
@@ -172,9 +171,10 @@ class XLSXParser:
     period_validator = None  # just initializing empty variables for better readability
     unit_validator = None
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, is_validator: bool):
         try:
             self.filepath = path  # writes path to save
+            self.is_validator = is_validator
             self._wb = load_workbook(path)  # loads .xlsx file
             self._wb.active = 0  # sets first sheet as active
             self._ws = self._wb.active  # a reference to a worksheet
@@ -184,19 +184,21 @@ class XLSXParser:
                                      max_row=self.ending_row,
                                      values_only=True)
             self.ending_row = get_end_row(next(col), self.STARTING_ROW)
-            print(self.ending_row)
             self.period_list = self.get_values(self.PAGE_WITH_PERIOD_DATA)
             self.unit_list = self.get_values(self.PAGE_WITH_UNIT_DATA)
-            self.period_validator = get_validator(self.period_list)
-            self.unit_validator = get_validator(self.unit_list)
-            self.period_validator.errorTitle = self.unit_validator.errorTitle = 'Invalid Entry'
-            self.period_validator.errorTitle = self.unit_validator.errorTitle = 'Given entry is prohibited'
-            self.period_validator.promptTitle = 'Period list selection'
-            self.period_validator.prompt = 'Please select period from list'
-            self.unit_validator.promptTitle = 'Unit list selection'
-            self.unit_validator.prompt = 'Please select unit from list'
-            self._ws.add_data_validation(self.period_validator)
-            self._ws.add_data_validation(self.unit_validator)
+            # print(self.ending_row)
+            if self.is_validator:
+                self.period_validator = self.get_validator(self.PAGE_WITH_PERIOD_DATA)
+                self.unit_validator = self.get_validator(self.PAGE_WITH_UNIT_DATA)
+                self.period_validator.errorTitle = self.unit_validator.errorTitle = 'Недопустимое значение'
+                self.period_validator.errorTitle = self.unit_validator.errorTitle =\
+                    'Данное значение отсутствует в списке'
+                self.period_validator.promptTitle = 'Выбор видов периодичности'
+                self.period_validator.prompt = 'Пожалуйста выберите вид периодичности из списка'
+                self.unit_validator.promptTitle = 'Выбор единиц измерения'
+                self.unit_validator.prompt = 'Пожалуйста выберите единицы измерения из списка'
+                self._ws.add_data_validation(self.period_validator)
+                self._ws.add_data_validation(self.unit_validator)
 
         except (InvalidFileException, FileNotFoundError):
             print("Error! Bad path!")
@@ -230,8 +232,11 @@ class XLSXParser:
                                 self._ws.cell(row=row_counter, column=col_num, value=num)  # else do not touch
                     else:
                         if not is_formula(cel):
-                            # print(str(cel) + 'contains error')
-                            self._ws.cell(row=row_counter, column=col_num).fill = self.red_fill  # and if it is not
+                            if self._ws.cell(row=row_counter, column=col_num).fill != self.red_fill:
+                                print(str(get_column_letter(col_num)) + str(row_counter) +
+                                      ' ячейка содержит ошибку с числом. Помечено красным')
+                                self._ws.cell(row=row_counter, column=col_num).fill = self.red_fill  # and if it is not
+                                is_modified = True
                     row_counter += 1  # a number at all mark it with marking color.
         else:
             raise NonePointer('worksheet is not defined')
@@ -265,20 +270,30 @@ class XLSXParser:
             for cel in col:
                 if cel not in checklist and cel is not None and cel != '':
                     if self._ws.cell(row_counter, col_num).fill != highlight:  # if not yet marked
+                        if checklist is self.unit_list:
+                            print(str(get_column_letter(col_num)) + str(row_counter) +
+                                  ' ячейка содержит ошибку единицы измерения. Помечено цветом сепии')
+                        else:
+                            print(str(get_column_letter(col_num)) + str(row_counter) +
+                                  ' ячейка содержит ошибку вида периодичности. Помечено желтым')
                         self._ws.cell(row_counter, col_num).fill = highlight
                         is_modified = True  # if any cell highlighted (changed) - change modify status
-                validator.add(self._ws.cell(row_counter, col_num))
                 row_counter += 1
+            if self.is_validator:
+                validator.add(str(get_column_letter(col_num)) + str(self.STARTING_ROW) + ':'
+                              + str(get_column_letter(col_num)) + str(self.ENDING_ROW))
         else:
             raise NonePointer('worksheet is not defined')
         return is_modified
 
-    def find_errors(self, is_set_validator):  # this function basically used just to parse through the table
+    def find_errors(self):  # this function basically used just to parse through the table
         if self._ws is not None:
             is_num_modified = False
             is_other_modified = False
             col_counter = 4
             subsection_amount = 961
+            print('Если таблица не содержит ошибок или они уже были помечены - ничего не будет выведено в лог'
+                  ', иначе будут выведены номера ячеек с ошибками, типом ошибки и помеченным цветом')
             for i in range(subsection_amount):
                 header = self._ws.cell(column=col_counter, row=self.STARTING_ROW - 1).value
                 col = self._ws.iter_cols(min_col=col_counter,
@@ -298,8 +313,8 @@ class XLSXParser:
                     if tmp:
                         is_other_modified = True
                 col_counter += 1
-            print(is_num_modified, is_other_modified)
-            if is_num_modified or is_other_modified or is_set_validator:
+            # print(is_num_modified, is_other_modified)
+            if is_num_modified or is_other_modified or self.is_validator:
                 self._wb.save(self.filepath)
         else:
             raise NonePointer('Worksheet is not defined')
@@ -321,16 +336,31 @@ class XLSXParser:
                     counter += 1
                 self._wb.active = 0  # sets first page as active after all actions, just in case
                 ans = tuple(OrderedDict.fromkeys(ans))  # delete all duplicates preserving order
-                print(ans)
+                # print(ans)
                 return ans
             except AttributeError:
                 print('page is not defined or does not exist')
         else:
             raise NonePointer('Workbook is not defined')
 
+    def get_validator(self, page: int) -> DataValidation:
+        """
+        returns data validator initialized with specified list(set)
+        :param page: int (number of page with data that needs to be validated)
+        :return:
+        """
+        lt = self.get_values(page)  # this is needed just to find number of rows in the next line
+        end_row = get_end_row(lt, 1)
+        self._wb.active = page
+        # print("{}!$A$1:$A${}".format(quote_string(self._wb.active.title), end_row))
+        dv = DataValidation(type='list', formula1="{}!$A$1:$A${}".format(quote_string(self._wb.active.title), end_row),
+                            showDropDown=False)
+        self._wb.active = 0  # return to zero page
+        return dv
 
-s = input('input path to .xlsx file and write y/n separated by comma whether you need or not to add validator: ')
+
+s = input('Введите путь к .xlsx файлу и через запятую напишите y/n нужно/не нужно добавлять валидатор: ')
 # print(s)
 path, is_validator = parse_input(s)
-xl = XLSXParser(path)
-xl.find_errors(is_validator)
+xl = XLSXParser(path, is_validator)
+xl.find_errors()

@@ -1,11 +1,8 @@
 from collections import OrderedDict
 
 from openpyxl import load_workbook
+from openpyxl.utils import column_index_from_string
 
-from xlsx_parser import parse_input
-
-t = 'example_form_2_3.xlsx, y'
-path, is_set = parse_input(t)
 wb = load_workbook('example_form_2_3.xlsx')
 wb.active = 0
 a = None
@@ -16,14 +13,16 @@ ws = wb.active
 # ws['H5'] = 'asgga'
 # ws['I5'] = 'qwet'
 # wb.save('example_form_2_3.xlsx')
-print(ws.cell(7, 871).value)
 # print(int(a) + float(b))
-a = True and b
+# a = True and b
 print(a)
+ws.cell(7, column_index_from_string('H'), 'asdg')
+ws.cell(7, column_index_from_string('G'), '123fef')
 test = tuple(OrderedDict.fromkeys(test))
 # test = ','.join(test)
 # test = '"' + test + '"'
 print(test)
-print(t[0])
-print(t[1].strip())
-print(path, is_set)
+# print(t[0])
+# print(t[1].strip())
+# print(path, is_set)
+wb.save('example_form_2_3.xlsx')
