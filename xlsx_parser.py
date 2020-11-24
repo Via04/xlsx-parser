@@ -4,7 +4,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.datavalidation import DataValidation
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, column_index_from_string
 
 
 # Custom Errors
@@ -154,9 +154,19 @@ class XLSXParser:
     STARTING_ROW = 5  # the number of row after headers
     PAGE_WITH_PERIOD_DATA = 1  # constant that stores number of page with period data
     PAGE_WITH_UNIT_DATA = 2  # constant that stores number of page with unit data
-    NUM_SUBSECTIONS = {'Раз', 'Объем', 'Расценка', 'Годовая стоимость'}  # needed sections for fix_num_column
-    PERIOD_SUBSECTIONS = {'Периодичность', }  # needed sections for fix_other_column (applies to next line too)
-    UNIT_SUBSECTIONS = {'Ед.изм.', }
+    NUM_SUBSECTIONS = ('Раз', 'Объем', 'Расценка', 'Годовая стоимость')  # needed sections for fix_num_column
+    PERIOD_SUBSECTIONS = ('Периодичность', )  # needed sections for fix_other_column (applies to next line too)
+    UNIT_SUBSECTIONS = ('Ед.изм.', )
+    PERIOD_TRANSFER = {'раз в день, кроме праздничных и воскресных дней': 300,
+                       'раз в день, кроме праздничных и выходных дней': 248,
+                       'раз в квартал': 4,
+                       'раз в месяц': 12,
+                       'раз в неделю': 52,
+                       'Круглосуточно': 365,
+                       'раз в день': 365,
+                       'Осмотр раз в год. По итогам осмотра работы включаются в план текущего ремонта': 1,
+                       'раз в год': 1
+                       }
     ENDING_ROW = 600
     ending_row = 600  # number of row to watch in first column, will be changed in __init__ according to number of rows
     filepath = 'default_name.xlsx'  # in column
@@ -286,12 +296,21 @@ class XLSXParser:
             raise NonePointer('worksheet is not defined')
         return is_modified
 
-    def find_errors(self):  # this function basically used just to parse through the table
+    def find_errors(self):
+        """
+        this method parses the table and fixes the errors with fix_num_column and fix_other_column. Also
+        it checks value in 'Годовая стоимость' and replaces it if it contains error
+        :return:
+        """
         if self._ws is not None:
             is_num_modified = False
             is_other_modified = False
             col_counter = 4
             subsection_amount = 961
+            n = []
+            periodicity = []
+            amount = []
+            tariff = []
             print('Если таблица не содержит ошибок или они уже были помечены - ничего не будет выведено в лог'
                   ', иначе будут выведены номера ячеек с ошибками, типом ошибки и помеченным цветом')
             for i in range(subsection_amount):
@@ -312,6 +331,25 @@ class XLSXParser:
                     tmp = self.fix_other_column(col_tup, col_counter, header)
                     if tmp:
                         is_other_modified = True
+                print(header)
+                if header == self.NUM_SUBSECTIONS[0]:
+                    n = get_column_letter(col_counter)
+                    print(n)
+                if header == self.PERIOD_SUBSECTIONS[0]:
+                    periodicity = self.trans_period(col_tup)
+                    print(periodicity)
+                if header == self.NUM_SUBSECTIONS[1]:
+                    amount = get_column_letter(col_counter)
+                    print(amount)
+                if header == self.NUM_SUBSECTIONS[2]:
+                    tariff = get_column_letter(col_counter)
+                    print(tariff)
+                if header == self.NUM_SUBSECTIONS[3] and len([i for i in n if i is not None]) > 0 and \
+                        len([i for i in periodicity if i is not None]) > 0 and \
+                        len([i for i in amount if i is not None]) > 0 and \
+                        len([i for i in tariff if i is not None]) > 0:
+                    price = self.form_price(periodicity, n, amount, tariff)
+                    self.assign_col(price, col_counter)
                 col_counter += 1
             # print(is_num_modified, is_other_modified)
             if is_num_modified or is_other_modified or self.is_validator:
@@ -357,6 +395,45 @@ class XLSXParser:
                             showDropDown=False)
         self._wb.active = 0  # return to zero page
         return dv
+
+    def trans_period(self, col: tuple) -> tuple:
+        """
+        transfers string in column 'Периодичность' to a number according to PERIOD_TRANSFER constant
+        :param col: tuple (a tuple of a column "Периодичность")
+        :return: tuple (with numbers according to PERIOD_TRANSFER
+        """
+        ans = []
+        for el in col:
+            ans.append(self.PERIOD_TRANSFER.get(el))
+        return tuple(ans)
+
+    def assign_col(self, col: tuple, col_num: int):
+        """
+        assign values from the tuple to a specified column
+        :param col: tuple (tuple with data to assign)
+        :param col_num: int (number of column to assign)
+        :return:
+        """
+        row_counter = self.STARTING_ROW
+        for el in col:
+            if el != '#ERR':
+                self._ws.cell(row_counter, col_num, el)
+            row_counter += 1
+
+    def form_price(self, periodicity: tuple, n: str, amount: str, tariff: str) -> tuple:
+        """returns formula tuple of 'Годовая стоимость' column"""
+        ans = []
+        row_counter = self.STARTING_ROW
+        for period in periodicity:
+            if period is not None and self._ws.cell(row_counter, column_index_from_string(n)).value is not None and \
+                    self._ws.cell(row_counter, column_index_from_string(amount)).value is not None and \
+                    self._ws.cell(row_counter, column_index_from_string(tariff)).value is not None:
+                ans.append('=' + n + str(row_counter) + '*' + str(period) + '*' + amount + str(row_counter) +
+                           '*' + tariff + str(row_counter) + '/1000')
+            else:
+                ans.append('#ERR')
+            row_counter += 1
+        return tuple(ans)
 
 
 s = input('Введите путь к .xlsx файлу и через запятую напишите y/n нужно/не нужно добавлять валидатор: ')
